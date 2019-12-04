@@ -199,7 +199,7 @@ function doFun(fn, isComponent, initFn) {
             },
             make(opt) {
                 if (typeof opt == "string") {
-                    let opt = options[opt]
+                    opt = options[opt]
                     if (!opt) {
                         opt = options[opt] = {}
                     }
