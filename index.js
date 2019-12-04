@@ -1,21 +1,36 @@
+let hasOwnProperty = Object.prototype.hasOwnProperty
 let toString = Object.prototype.toString
 //======================================================================
+
+let msgOpt = {
+    before: "已经初始化，请在初始化之前调用",
+    after: "还没初始化，请在初始化之后调用"
+}
+function warn(msg = "before") {
+    console.warn(msgOpt[msg] || msg || "")
+}
 
 // 插件模式
 let pluginArr = []
 function doFunOn(fn) {
     pluginArr.push(fn)
 }
-function doFun(fn, isComponent) {
+function doFun(fn, isComponent, initFn) {
+    if (initFn === undefined) {
+        initFn = isComponent ? Component : Page
+    }
     // 一些临时字段，unload会自动清理
     let temp = {}
     let vm
 
-    function $vm(key) {
-        if (key) {
-            return vm[key]
-        }
+    function $vm() {
         return vm
+    }
+
+    function $bind(fn) {
+        return function() {
+            fn.apply(vm, arguments)
+        }
     }
 
     let options = {}
@@ -68,50 +83,91 @@ function doFun(fn, isComponent) {
     }
 
     let methods = {}
-    function methodsHandle(fn) {
-        return function() {
-            fn.apply(vm, arguments)
-        }
-    }
     function setMethods(key, fn) {
-        if (typeof key == "function") {
-            return methodsHandle(key)
-        }
         if (vm) {
+            warn("before")
             return
         }
 
         if (typeof key == "string") {
             methods[key] = fn
-            return methodsHandle(fn)
+            return $bind(fn)
         }
 
         let val = {}
         for (let n in key) {
             methods[n] = key[n]
-            val[n] = methodsHandle(key[n])
+            val[n] = $bind(key[n])
         }
         return val
     }
 
-    function setter(key) {
-        return function(k, v) {
-            let opt = vm || options
-            if (v === undefined) {
-                opt[key] = k
+    function fnToBindVM({ value }) {
+        if (typeof value == "function") {
+            return $bind(value)
+        }
+        return value
+    }
+
+    function setter({
+        // options 属性
+        prot,
+        format,
+        isFreeze,
+        isBack = true
+    }) {
+        let opt = {}
+
+        function setterOn(key, val) {
+            if (vm) {
+                warn("before")
                 return
             }
 
-            let toOpt = opt[key]
-            if (!toOpt) {
-                toOpt = opt[key] = {}
+            if (prot && !options[prot]) {
+                options[prot] = opt
             }
+            let back = (isBack && {}) || null
+            if (typeof key == "string") {
+                key = { [key]: val }
+            }
+            for (let n in key) {
+                // console.log(prot, key, n, hasOwnProperty.call(key, n), back, format)
+                if (hasOwnProperty.call(key, n)) {
+                    opt[n] = key[n]
+                    if (back) {
+                        if (format) {
+                            let bkVal = format({ value: key[n], backData: back, key: n, opt })
+                            // console.log(prot, "bkVal", bkVal)
+                            if (bkVal !== undefined) {
+                                back[n] = bkVal
+                            }
+                        } else {
+                            back[n] = val
+                        }
+                    }
+                }
+            }
+            if (back && isFreeze) {
+                return Object.freeze(back)
+            }
+            return back
+        }
 
-            if (typeof k == "string") {
-                toOpt[k] = v
+        return {
+            data: opt,
+            on: setterOn
+        }
+    }
+
+    function setProt(prot, format) {
+        return function(val) {
+            if (vm) {
+                warn("before")
                 return
             }
-            Object.assign(toOpt, k)
+            options[prot] = val
+            return format ? format(val) : val
         }
     }
 
@@ -125,7 +181,7 @@ function doFun(fn, isComponent) {
     function makeLifecycle() {
         let lifecycles = {}
 
-        return {
+        let back = {
             on(key, fn) {
                 if (typeof key == "string") {
                     let lc = lifecycles[key]
@@ -136,10 +192,18 @@ function doFun(fn, isComponent) {
                     return
                 }
                 for (let n in key) {
-                    lifecycle(n, key[n])
+                    back.on(n, key[n])
                 }
+
+                return back
             },
-            make(opt = {}) {
+            make(opt) {
+                if (typeof opt == "string") {
+                    let opt = options[opt]
+                    if (!opt) {
+                        opt = options[opt] = {}
+                    }
+                }
                 for (let n in lifecycles) {
                     opt[n] = lifecycleExec(lifecycles[n])
                 }
@@ -152,7 +216,7 @@ function doFun(fn, isComponent) {
                 }
             },
             currying(key) {
-                return fn => this.on(key, fn)
+                return fn => back.on(key, fn)
             },
             has() {
                 for (let n in lifecycles) {
@@ -160,6 +224,28 @@ function doFun(fn, isComponent) {
                 }
                 return false
             }
+        }
+
+        return back
+    }
+
+    let quickNextArr = []
+    function quickNext(key) {
+        // let vKey = key.replace(/^\$+/, "")
+        return function() {
+            let vl = vm
+            // if (!vl && Vue && typeof Vue[vKey] == "function") {
+            //     key = vKey
+            //     vl = Vue
+            // }
+            if (!vl) {
+                quickNextArr.push({
+                    key: key,
+                    args: arguments
+                })
+                return
+            }
+            return vl[key](...arguments)
         }
     }
 
@@ -175,6 +261,7 @@ function doFun(fn, isComponent) {
 
         // 参数
         $vm,
+        $bind,
         $setData: setData,
         $getData: getData,
         $methods: setMethods
@@ -197,16 +284,25 @@ function doFun(fn, isComponent) {
         }
     }
 
+    function attached() {
+        vm = this
+        while (quickNextArr.length) {
+            let toDo = quickNextArr.shift()
+            vm[toDo.key](...toDo.args)
+        }
+    }
+
     if (isComponent) {
         // 组件特有
-        fnArg.$properties = setter("properties")
+        fnArg.$properties = setter({
+            prot: "properties",
+            isBack: false
+        })
         fnArg.$attached = lifecycle.currying("attached")
         fnArg.$ready = lifecycle.currying("ready")
         fnArg.$detached = lifecycle.currying("detached")
 
-        lifecycle.on("attached", function() {
-            vm = this
-        })
+        lifecycle.on("attached", attached)
         lifecycle.on("detached", detached)
     } else {
         fnArg.$attached = fnArg.$onLoad = lifecycle.currying("onLoad")
@@ -218,7 +314,7 @@ function doFun(fn, isComponent) {
 
         lifecycle.on("onLoad", function(query) {
             temp.query = query
-            vm = this
+            attached.call(this)
         })
         lifecycle.on("onUnload", detached)
     }
@@ -239,7 +335,10 @@ function doFun(fn, isComponent) {
             fnArg,
             lifecycle,
             makeLifecycle,
+            quickNext,
             setter,
+            fnToBindVM,
+            setProt,
             isComponent
         })
     })
@@ -254,11 +353,11 @@ function doFun(fn, isComponent) {
 
     if (isComponent) {
         options.methods = methods
-        Component(options)
     } else {
         Object.assign(options, methods)
-        Page(options)
     }
+
+    initFn && initFn(options)
 
     return options
 }
